@@ -1,0 +1,14 @@
+{
+  "name": "merchant-bot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "telegraf": "^4.12.0",
+    "kokos-activator-api": "latest",
+    "axios": "^1.4.0",
+    "pg": "^8.11.0"
+  }
+}
