@@ -41,12 +41,21 @@ bot.on('text', async (ctx) => {
     if (/^\d+$/.test(text)) {
         try {
             const url = `https://api.game4station.com/client/api/checkName?game=pubgm&userId=${text}&serverId=`;
-            const res = await axios.get(url, { headers: { 'Authorization': `Bearer ${process.env.G4S_TOKEN}` } });
+            const res = await axios.get(url, { 
+                headers: { 'Authorization': `Bearer ${process.env.G4S_TOKEN}` } 
+            });
+            
             if (res.data && res.data.userName) {
                 return ctx.reply(`👤 اللاعب: ${res.data.userName}\n\nاختر الفئة:`, 
                     Markup.inlineKeyboard([[Markup.button.callback("60 UC", `confirm_${text}_60`)]]));
+            } else {
+                return ctx.reply("❌ لم نتمكن من العثور على اسم اللاعب، تأكد من الآيدي.");
             }
-        } catch (e) { ctx.reply("❌ لاعب غير موجود."); }
+        } catch (e) { 
+            // سيطبع لك البوت هنا سبب الفشل الحقيقي (هل التوكن خطأ أم الموقع متوقف)
+            console.error(e.response?.data);
+            ctx.reply(`⚠️ فشل الفحص: ${e.response?.data?.message || "خطأ في الاتصال بالـ API"}`); 
+        }
     }
 });
 
@@ -82,3 +91,4 @@ http.createServer((req, res) => {
     res.write('Bot is running');
     res.end();
 }).listen(process.env.PORT || 3000);
+
