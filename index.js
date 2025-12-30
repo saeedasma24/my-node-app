@@ -36,12 +36,12 @@ bot.on('text', async (ctx) => {
     const text = ctx.message.text;
     if (/^\d+$/.test(text)) {
         const loadingMsg = await ctx.reply("🔍 جاري الفحص...");
-       try {
+     try {
             const url = `https://api.game4station.com/client/api/checkName?game=pubgm&userId=${text}&serverId=`;
             
             const res = await axios.get(url, { 
                 headers: { 
-                    'api-token': process.env.G4S_TOKEN, // التعديل النهائي والدقيق هنا
+                    'api-token': process.env.G4S_TOKEN,
                     'Content-Type': 'application/json'
                 },
                 timeout: 10000 
@@ -49,18 +49,25 @@ bot.on('text', async (ctx) => {
 
             console.log("Response from G4S:", res.data);
 
-            if (res.data && res.data.userName) {
-                const name = res.data.userName;
+            // التعديل هنا لقراءة الاسم من داخل data.name
+            if (res.data && res.data.status === 'OK' && res.data.data && res.data.data.name) {
+                const playerName = res.data.data.name;
                 await ctx.telegram.deleteMessage(ctx.chat.id, loadingMsg.message_id);
-                return ctx.reply(`👤 اسم اللاعب: ${name}\n\nاختر كمية الشحن:`, 
+                
+                return ctx.reply(`👤 اسم اللاعب: ${playerName}\n\nاختر كمية الشحن:`, 
                     Markup.inlineKeyboard([
                         [Markup.button.callback("60 UC", `confirm_${text}_60`)],
                         [Markup.button.callback("325 UC", `confirm_${text}_325`)]
                     ])
                 );
             } else {
+                await ctx.telegram.deleteMessage(ctx.chat.id, loadingMsg.message_id);
                 return ctx.reply("❌ لم يتم العثور على اسم لهذا الآيدي. تأكد من الرقم.");
             }
+        } catch (e) {
+            console.error("API Error:", e.response?.data || e.message);
+            ctx.reply("⚠️ حدث خطأ أثناء الاتصال بسيرفر الفحص.");
+        }
         } catch (e) {
             console.error("API Error:", e.response?.data || e.message);
             const errorStatus = e.response?.status;
@@ -99,4 +106,5 @@ bot.action(/confirm_(.+)_(.+)/, async (ctx) => {
 // تشغيل البوت وخداع ريندر بفتح بورت
 bot.launch().then(() => console.log("Bot Live!"));
 http.createServer((req, res) => { res.write('OK'); res.end(); }).listen(process.env.PORT || 3000);
+
 
