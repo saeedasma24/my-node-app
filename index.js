@@ -2,126 +2,120 @@ const { Telegraf, Markup } = require('telegraf');
 const { KokosApiClient } = require("kokos-activator-api");
 const axios = require('axios');
 const { Pool } = require('pg');
-const http = require('http');
 
-// الإعدادات من Environment Variables
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const kokos = new KokosApiClient({ token: process.env.KOKOS_TOKEN, environment: "PRODUCTION" });
-const db = new Pool({ 
-    connectionString: process.env.DATABASE_URL, 
-    ssl: { rejectUnauthorized: false } 
-});
+const db = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 
 const ADMIN_ID = parseInt(process.env.ADMIN_ID);
 
-// دالة التحقق من اشتراك وصلاحية التاجر
-async function getMerchant(userId) {
-    const res = await db.query(
-        `SELECT * FROM merchants 
-         WHERE telegram_id = $1 
-         AND is_active = true 
-         AND subscription_expiry > CURRENT_TIMESTAMP`, 
-        [userId]
-    );
-    return res.rows[0];
+// قوالب النصوص للغتين
+const strings = {
+    ar: {
+        welcome: "👋 أهلاً بك في game-station-bot\nحالتك: تاجر معتمد ✅",
+        no_sub: "🚫 اشتراكك منتهي. يرجى دفع 80$ للتجديد.",
+        redeem: "🚀 شحن لاعب",
+        add_code: "📥 إضافة أكواد",
+        inventory: "📦 مخزني",
+        limit_reached: "⚠️ عذراً، وصلت للحد اليومي (300 عملية).",
+        enter_id: "🔢 أرسل آيدي اللاعب:",
+        success: "✅ تم الشحن بنجاح! اللاعب: "
+    },
+    en: {
+        welcome: "👋 Welcome to game-station-bot\nStatus: Authorized Merchant ✅",
+        no_sub: "🚫 Subscription expired. Please pay $80 to renew.",
+        redeem: "🚀 Redeem Player",
+        add_code: "📥 Add Codes",
+        inventory: "📦 My Inventory",
+        limit_reached: "⚠️ Sorry, daily limit reached (300/day).",
+        enter_id: "🔢 Send Player ID:",
+        success: "✅ Successfully Charged! Player: "
+    }
+};
+
+// وظيفة التحقق من التاجر
+async function checkMerchant(ctx) {
+    const res = await db.query('SELECT * FROM merchants WHERE telegram_id = $1 AND subscription_expiry > CURRENT_TIMESTAMP', [ctx.from.id]);
+    if (res.rows.length > 0 || ctx.from.id === ADMIN_ID) return res.rows[0];
+    return null;
 }
 
 bot.start(async (ctx) => {
-    const userId = ctx.from.id;
-    const merchant = await getMerchant(userId);
+    const merchant = await checkMerchant(ctx);
+    if (!merchant && ctx.from.id !== ADMIN_ID) return ctx.reply(strings.ar.no_sub);
 
-    if (userId === ADMIN_ID || merchant) {
-        return ctx.reply("🌐 اختر اللغة / Choose Language:", 
-            Markup.inlineKeyboard([
-                [Markup.button.callback("العربية 🇸🇦", "lang_ar"), Markup.button.callback("English 🇺🇸", "lang_en")]
-            ])
-        );
-    }
-    return ctx.reply("🚫 اشتراكك غير مفعل أو منتهي. يرجى التواصل مع الإدارة.\nYour subscription is inactive or expired.");
+    const lang = merchant?.language || 'ar';
+    return ctx.reply(strings[lang].welcome, Markup.inlineKeyboard([
+        [Markup.button.callback(strings[lang].redeem, "start_redeem")],
+        [Markup.button.callback(strings[lang].add_code, "menu_add")],
+        [Markup.button.callback(strings[lang].inventory, "view_inv")]
+    ]));
 });
 
-// التعامل مع اختيار اللغة (مثال للعربية)
-bot.action("lang_ar", (ctx) => {
-    ctx.reply("مرحباً بك في لوحة التحكم:", 
-        Markup.inlineKeyboard([
-            [Markup.button.callback("🚀 شحن لاعب", "start_redeem")],
-            [Markup.button.callback("📦 إضافة أكواد لمخزني", "add_codes")],
-            [Markup.button.callback("📊 إحصائياتي", "my_stats")]
-        ])
-    );
+// نظام الشحن - الفحص ثم التنفيذ
+bot.action("start_redeem", async (ctx) => {
+    const merchant = await checkMerchant(ctx);
+    const lang = merchant?.language || 'ar';
+    ctx.reply(strings[lang].enter_id);
 });
-
-bot.action("start_redeem", (ctx) => ctx.reply("🔢 أرسل آيدي اللاعب (PUBG ID):"));
 
 bot.on('text', async (ctx) => {
-    const userId = ctx.from.id;
-    const text = ctx.message.text;
-    const merchant = await getMerchant(userId);
+    const merchant = await checkMerchant(ctx);
+    if (!merchant) return;
+    const lang = merchant.language || 'ar';
 
-    if (!merchant && userId !== ADMIN_ID) return ctx.reply("❌ غير مسموح لك بالوصول.");
+    // 1. فحص إذا كان النص هو آيدي لاعب
+    if (/^\d{5,15}$/.test(ctx.message.text)) {
+        if (merchant.daily_requests_count >= 300) return ctx.reply(strings[lang].limit_reached);
 
-    if (/^\d+$/.test(text)) {
-        // فحص الكوتا اليومية للتاجر (حد 300 عملية)
-        if (merchant.daily_requests_count >= 300) {
-            return ctx.reply("⚠️ عذراً، لقد استهلكت حدك اليومي (300 عملية). يتجدد الحد كل 24 ساعة.");
-        }
-
-        const loadingMsg = await ctx.reply("🔍 جاري فحص اللاعب...");
         try {
-            const url = `https://api.game4station.com/client/api/checkName?game=pubgm&userId=${text}&serverId=`;
-            const res = await axios.get(url, { headers: { 'api-token': process.env.G4S_TOKEN } });
-
-            if (res.data && res.data.status === 'OK' && res.data.data.name) {
-                const playerName = res.data.data.name;
-                await ctx.telegram.deleteMessage(ctx.chat.id, loadingMsg.message_id);
-                
-                return ctx.reply(`👤 اللاعب: ${playerName}\nاختر الكمية:`, 
-                    Markup.inlineKeyboard([
-                        [Markup.button.callback("60 UC", `confirm_${text}_60`)],
-                        [Markup.button.callback("325 UC", `confirm_${text}_325`)]
-                    ])
-                );
+            // استخدام API لـ Game4Station للفحص فقط
+            const res = await axios.get(`https://api.game4station.com/client/api/checkName?game=pubgm&userId=${ctx.message.text}`, {
+                headers: { 'api-token': process.env.G4S_TOKEN }
+            });
+            
+            if (res.data?.status === 'OK') {
+                const name = res.data.data.name;
+                return ctx.reply(`👤 ${name}\nChoose amount:`, Markup.inlineKeyboard([
+                    [Markup.button.callback("60 UC", `redeem_${ctx.message.text}_60`)],
+                    [Markup.button.callback("325 UC", `redeem_${ctx.message.text}_325`)]
+                ]));
             }
-        } catch (e) {
-            ctx.reply("❌ فشل التحقق من الآيدي.");
-        }
+        } catch (e) { ctx.reply("❌ Error Finding Player"); }
+    }
+    
+    // 2. إضافة أكواد (تنسيق: كود,فئة)
+    if (ctx.message.text.includes(',')) {
+        const [code, amount] = ctx.message.text.split(',');
+        await db.query('INSERT INTO codes_inventory (merchant_id, code_value, denomination) VALUES ($1, $2, $3)', [merchant.id, code.trim(), parseInt(amount)]);
+        ctx.reply("✅ Code added to your private vault!");
     }
 });
 
-bot.action(/confirm_(.+)_(.+)/, async (ctx) => {
-    const userId = ctx.from.id;
-    const playerId = ctx.match[1];
-    const amount = parseInt(ctx.match[2]);
-    const merchant = await getMerchant(userId);
+// تنفيذ الشحن المباشر دون إظهار بيانات الحساب
+bot.action(/redeem_(.+)_(.+)/, async (ctx) => {
+    const [_, pid, amt] = ctx.match;
+    const merchant = await checkMerchant(ctx);
+    
+    // سحب كود من مخزن التاجر حصراً
+    const codeObj = await db.query('SELECT * FROM codes_inventory WHERE merchant_id = $1 AND denomination = $2 AND is_used = false LIMIT 1', [merchant.id, amt]);
+    
+    if (!codeObj.rows[0]) return ctx.reply("❌ Your inventory is empty!");
 
     try {
-        // سحب كود من "مخزن التاجر نفسه" فقط
-        const codeData = await db.query(
-            'SELECT * FROM codes_inventory WHERE merchant_id = $1 AND is_used = false AND denomination = $2 LIMIT 1', 
-            [merchant.id, amount]
-        );
-        
-        if (!codeData.rows[0]) {
-            return ctx.reply(`❌ مخزنك فارغ من فئة ${amount} UC. قم بإضافة أكواد أولاً.`);
-        }
-
-        // تنفيذ الشحن عبر Kokos API
-        const result = await kokos.redeem.redeemCode({
-            playerId: playerId,
-            codeOverride: codeData.rows[0].code_value,
-            denomination: amount
+        await kokos.redeem.redeemCode({
+            playerId: pid,
+            codeOverride: codeObj.rows[0].code_value,
+            requireReceipt: false // حجب بيانات الحسابات والإيميلات
         });
 
-        // تحديث قاعدة البيانات: وسم الكود كمستخدم + زيادة عداد التاجر
-        await db.query('UPDATE codes_inventory SET is_used = true WHERE id = $1', [codeData.rows[0].id]);
+        await db.query('UPDATE codes_inventory SET is_used = true WHERE id = $1', [codeObj.rows[0].id]);
         await db.query('UPDATE merchants SET daily_requests_count = daily_requests_count + 1 WHERE id = $1', [merchant.id]);
-
-        ctx.reply(`✅ تم الشحن بنجاح!\n👤 اللاعب: ${result.name}\n📦 الفئة: ${amount} UC`);
         
-    } catch (error) {
-        ctx.reply(`❌ فشل الشحن: ${error.body?.errorCode || "خطأ غير معروف"}`);
+        ctx.reply(strings[merchant.language].success + pid);
+    } catch (err) {
+        ctx.reply("❌ Activation Error: " + (err.body?.errorCode || "Unknown")); // معالجة الأخطاء
     }
 });
 
 bot.launch();
-http.createServer((req, res) => { res.end('OK'); }).listen(process.env.PORT || 3000);
