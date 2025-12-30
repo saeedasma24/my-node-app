@@ -71,5 +71,14 @@ bot.action(/confirm_(.+)_(.+)/, async (ctx) => {
     }
 });
 
-bot.launch();
-console.log("Bot is running...");
+// تشغيل البوت
+bot.launch().then(() => {
+    console.log("✅ البوت يعمل الآن بنجاح...");
+});
+
+// هذا الجزء ضروري جداً لمنصة Render لمنع الخطأ (Status 1)
+const http = require('http');
+http.createServer((req, res) => {
+    res.write('Bot is running');
+    res.end();
+}).listen(process.env.PORT || 3000);
