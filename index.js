@@ -14,91 +14,114 @@ const db = new Pool({
 
 const ADMIN_ID = parseInt(process.env.ADMIN_ID);
 
+// دالة التحقق من اشتراك وصلاحية التاجر
+async function getMerchant(userId) {
+    const res = await db.query(
+        `SELECT * FROM merchants 
+         WHERE telegram_id = $1 
+         AND is_active = true 
+         AND subscription_expiry > CURRENT_TIMESTAMP`, 
+        [userId]
+    );
+    return res.rows[0];
+}
+
 bot.start(async (ctx) => {
     const userId = ctx.from.id;
-    try {
-        const merchant = await db.query('SELECT * FROM merchants WHERE telegram_id = $1 AND is_active = true', [userId]);
-        if (userId === ADMIN_ID || merchant.rows.length > 0) {
-            return ctx.reply("👋 أهلاً بك في نظام الشحن الخاص بك:", 
-                Markup.inlineKeyboard([[Markup.button.callback("🚀 شحن لاعب", "start_redeem")]])
-            );
-        }
-        return ctx.reply("🚫 عذراً، أنت غير مسجل كتاجر.");
-    } catch (err) {
-        console.error(err);
-        ctx.reply("⚠️ خطأ في الاتصال بقاعدة البيانات.");
+    const merchant = await getMerchant(userId);
+
+    if (userId === ADMIN_ID || merchant) {
+        return ctx.reply("🌐 اختر اللغة / Choose Language:", 
+            Markup.inlineKeyboard([
+                [Markup.button.callback("العربية 🇸🇦", "lang_ar"), Markup.button.callback("English 🇺🇸", "lang_en")]
+            ])
+        );
     }
+    return ctx.reply("🚫 اشتراكك غير مفعل أو منتهي. يرجى التواصل مع الإدارة.\nYour subscription is inactive or expired.");
+});
+
+// التعامل مع اختيار اللغة (مثال للعربية)
+bot.action("lang_ar", (ctx) => {
+    ctx.reply("مرحباً بك في لوحة التحكم:", 
+        Markup.inlineKeyboard([
+            [Markup.button.callback("🚀 شحن لاعب", "start_redeem")],
+            [Markup.button.callback("📦 إضافة أكواد لمخزني", "add_codes")],
+            [Markup.button.callback("📊 إحصائياتي", "my_stats")]
+        ])
+    );
 });
 
 bot.action("start_redeem", (ctx) => ctx.reply("🔢 أرسل آيدي اللاعب (PUBG ID):"));
 
 bot.on('text', async (ctx) => {
+    const userId = ctx.from.id;
     const text = ctx.message.text;
+    const merchant = await getMerchant(userId);
+
+    if (!merchant && userId !== ADMIN_ID) return ctx.reply("❌ غير مسموح لك بالوصول.");
+
     if (/^\d+$/.test(text)) {
-        const loadingMsg = await ctx.reply("🔍 جاري الفحص...");
+        // فحص الكوتا اليومية للتاجر (حد 300 عملية)
+        if (merchant.daily_requests_count >= 300) {
+            return ctx.reply("⚠️ عذراً، لقد استهلكت حدك اليومي (300 عملية). يتجدد الحد كل 24 ساعة.");
+        }
+
+        const loadingMsg = await ctx.reply("🔍 جاري فحص اللاعب...");
         try {
             const url = `https://api.game4station.com/client/api/checkName?game=pubgm&userId=${text}&serverId=`;
-            
-            const res = await axios.get(url, { 
-                headers: { 
-                    'api-token': process.env.G4S_TOKEN,
-                    'Content-Type': 'application/json'
-                },
-                timeout: 10000 
-            });
+            const res = await axios.get(url, { headers: { 'api-token': process.env.G4S_TOKEN } });
 
-            console.log("Response from G4S:", res.data);
-
-            // التحقق من وجود الاسم بناءً على الرد الفعلي للسيرفر
-            if (res.data && res.data.status === 'OK' && res.data.data && res.data.data.name) {
+            if (res.data && res.data.status === 'OK' && res.data.data.name) {
                 const playerName = res.data.data.name;
                 await ctx.telegram.deleteMessage(ctx.chat.id, loadingMsg.message_id);
                 
-                return ctx.reply(`👤 اسم اللاعب: ${playerName}\n\nاختر كمية الشحن:`, 
+                return ctx.reply(`👤 اللاعب: ${playerName}\nاختر الكمية:`, 
                     Markup.inlineKeyboard([
                         [Markup.button.callback("60 UC", `confirm_${text}_60`)],
                         [Markup.button.callback("325 UC", `confirm_${text}_325`)]
                     ])
                 );
-            } else {
-                await ctx.telegram.deleteMessage(ctx.chat.id, loadingMsg.message_id);
-                return ctx.reply("❌ لم يتم العثور على اسم لهذا الآيدي. تأكد من الرقم.");
             }
         } catch (e) {
-            console.error("API Error:", e.response?.data || e.message);
-            const errorStatus = e.response?.status;
-            if (errorStatus === 401) return ctx.reply("⚠️ خطأ: توكن Game4Station غير صحيح.");
-            ctx.reply(`⚠️ فشل الفحص: ${e.response?.data?.message || "مشكلة في سيرفر الفحص"}`);
+            ctx.reply("❌ فشل التحقق من الآيدي.");
         }
     }
 });
 
 bot.action(/confirm_(.+)_(.+)/, async (ctx) => {
+    const userId = ctx.from.id;
     const playerId = ctx.match[1];
     const amount = parseInt(ctx.match[2]);
+    const merchant = await getMerchant(userId);
 
     try {
-        const codeData = await db.query('SELECT * FROM codes_inventory WHERE is_used = false AND denomination = $1 LIMIT 1', [amount]);
+        // سحب كود من "مخزن التاجر نفسه" فقط
+        const codeData = await db.query(
+            'SELECT * FROM codes_inventory WHERE merchant_id = $1 AND is_used = false AND denomination = $2 LIMIT 1', 
+            [merchant.id, amount]
+        );
         
         if (!codeData.rows[0]) {
-            return ctx.reply(`❌ لا توجد أكواد متوفرة لفئة ${amount} UC في المخزن حالياً.`);
+            return ctx.reply(`❌ مخزنك فارغ من فئة ${amount} UC. قم بإضافة أكواد أولاً.`);
         }
 
+        // تنفيذ الشحن عبر Kokos API
         const result = await kokos.redeem.redeemCode({
             playerId: playerId,
             codeOverride: codeData.rows[0].code_value,
             denomination: amount
         });
 
+        // تحديث قاعدة البيانات: وسم الكود كمستخدم + زيادة عداد التاجر
         await db.query('UPDATE codes_inventory SET is_used = true WHERE id = $1', [codeData.rows[0].id]);
-        ctx.reply(`✅ تم الشحن بنجاح!\n👤 اللاعب: ${result.name || playerId}\n📦 الفئة: ${amount} UC`);
+        await db.query('UPDATE merchants SET daily_requests_count = daily_requests_count + 1 WHERE id = $1', [merchant.id]);
+
+        ctx.reply(`✅ تم الشحن بنجاح!\n👤 اللاعب: ${result.name}\n📦 الفئة: ${amount} UC`);
         
     } catch (error) {
-        console.error("Redeem Error:", error);
-        ctx.reply(`❌ فشل الشحن: ${error.body?.message || "خطأ داخلي"}`);
+        ctx.reply(`❌ فشل الشحن: ${error.body?.errorCode || "خطأ غير معروف"}`);
     }
 });
 
-// تشغيل البوت وفتح بورت لمنصة Render
-bot.launch().then(() => console.log("Bot Live!"));
-http.createServer((req, res) => { res.write('OK'); res.end(); }).listen(process.env.PORT || 3000);
+bot.launch();
+http.createServer((req, res) => { res.end('OK'); }).listen(process.env.PORT || 3000);
